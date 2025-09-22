@@ -1,1 +1,555 @@
+//@version=6
+indicator("KK Panel v8 Optimized (VWM/RVAT/MFP/Sector RS)", overlay=true, max_lines_count=20, max_labels_count=20)
 
+// =============== Panel Configuration ===============
+showPanel   = input.bool(true, "Show panel", group="Display")
+panelPosStr = input.string("Top Right", "Panel position",["Top Left","Top Center","Top Right","Middle Left","Middle Center","Middle Right","Bottom Left","Bottom Center","Bottom Right"],group="Display")
+panelSize   = input.string("Normal", "Panel size", ["Small","Normal","Large"], group="Display")
+compactMode = input.bool(false, "Compact mode (hide weak signals)", group="Display")
+
+// Size settings
+isSmall = panelSize == "Small"
+isLarge = panelSize == "Large"
+txtSize = isSmall ? size.tiny : (isLarge ? size.normal : size.small)
+
+// =============== Visual Theme ===============
+bgCol       = input.color(color.new(#1a1a1a, 5), "Panel background", group="Theme")
+txtCol      = input.color(#e0e0e0, "Text colour", group="Theme")
+headerCol   = input.color(#ffd700, "Header colour", group="Theme")
+strongCol   = input.color(#00ff41, "Strong signal", group="Theme")
+okCol       = input.color(#90ee90, "Good signal", group="Theme")
+warnCol     = input.color(#ff9800, "Warning signal", group="Theme")
+weakCol     = input.color(#808080, "Weak signal", group="Theme")
+badCol      = input.color(#ff4444, "Bad signal", group="Theme")
+showBorder  = input.bool(true, "Show border", group="Theme")
+borderColor = input.color(color.new(#606060, 40), "Border colour", group="Theme")
+borderWidth = input.int(1, "Border width", minval=0, group="Theme")
+
+// =============== Section Toggles ===============
+showSectorSection = input.bool(true, "🏭 Sector Analysis", group="Sections")
+showVolSection    = input.bool(true, "📊 Volume Analysis", group="Sections")
+showFlowSection   = input.bool(true, "💰 Money Flow", group="Sections")
+showMomentum      = input.bool(true, "🚀 Momentum & Strength", group="Sections")
+showLevelsSection = input.bool(true, "📍 Key Levels", group="Sections")
+showRiskSection   = input.bool(true, "⚠️ Risk Metrics", group="Sections")
+showSqueeze       = input.bool(true, "🎯 Squeeze Detection", group="Sections")
+
+// =============== Metric Settings ===============
+// Sector settings
+sectorETF = input.string("Auto", "Sector ETF", ["Auto", "XLK", "XLF", "XLV", "XLE", "XLI", "XLY", "XLP", "XLB", "XLRE", "XLU", "XLC"], group="Sector")
+showSectorRS = input.bool(true, "Show Sector RS", group="Sector")
+
+// Volume settings
+rvolLen     = input.int(20,  "RVOL lookback (bars)", minval=1, group="Volume")
+rvatDays    = input.int(20,  "RVAT lookback (days)", minval=5, maxval=30, group="Volume")
+advLen      = input.int(30,  "Avg daily vol lookback (days)", minval=5, group="Volume")
+rthMin      = input.int(390, "Session minutes (RTH)", minval=60, group="Volume")
+volAlert    = input.float(2.0,"Alert if RVOL ≥", minval=0.5, step=0.1, group="Volume")
+
+// Money Flow settings
+mfiLength   = input.int(14, "MFI Length", minval=5, group="Money Flow")
+vwmLength   = input.int(20, "VWM Length", minval=5, group="Money Flow")
+
+// Momentum settings
+bench       = input.symbol("SPY", "Benchmark (for RS)", group="Momentum")
+rsLookback  = input.int(252,"RS score lookback (days)", minval=20, group="Momentum")
+m1          = input.int(21,  "Momentum window #1 (days)", minval=5, group="Momentum")
+m2          = input.int(63,  "Momentum window #2 (days)", minval=10, group="Momentum")
+m3          = input.int(126, "Momentum window #3 (days)", minval=20, group="Momentum")
+m4          = input.int(252, "Momentum window #4 (days)", minval=30, group="Momentum")
+
+// Key levels settings
+vwapDist    = input.bool(true, "Show VWAP distance", group="Key Levels")
+showGap     = input.bool(true, "Show gap info", group="Key Levels")
+showOR      = input.bool(true, "Show opening range", group="Key Levels")
+orMinutes   = input.int(30, "Opening range minutes", minval=5, maxval=60, group="Key Levels")
+
+// Risk thresholds
+adrGreen    = input.float(4.0, "ADR% green ≥", step=0.1, group="Risk")
+adrWarn     = input.float(3.0, "ADR% warn ≥", step=0.1, group="Risk")
+atrGreen    = input.float(5.0, "ATR% green ≥", step=0.1, group="Risk")
+atrWarn     = input.float(4.0, "ATR% warn ≥", step=0.1, group="Risk")
+
+// Session settings for better market support
+sessionStr  = input.session("0930-1600", "Trading Session", group="Session")
+
+// =============== Helper Functions ===============
+f_pos_from_string(s) =>
+    switch s
+        "Top Left"      => position.top_left
+        "Top Center"    => position.top_center
+        "Top Right"     => position.top_right
+        "Middle Left"   => position.middle_left
+        "Middle Center" => position.middle_center
+        "Middle Right"  => position.middle_right
+        "Bottom Left"   => position.bottom_left
+        "Bottom Center" => position.bottom_center
+        => position.bottom_right
+
+curPos = f_pos_from_string(panelPosStr)
+
+f_fmt_num(v) =>
+    av = math.abs(v)
+    suf = ""
+    n = v
+    if av >= 1e9
+        suf := "B", n := v / 1e9
+    else if av >= 1e6
+        suf := "M", n := v / 1e6
+    else if av >= 1e3
+        suf := "K", n := v / 1e3
+    str.tostring(n, "#.##") + suf
+
+// Enhanced formatting helpers with error handling
+fmtPct(x)  => na(x) or math.abs(x) > 999 ? "—" : str.tostring(x, "#.#") + "%"
+fmtX(x)    => na(x) or math.abs(x) > 999 ? "—" : str.tostring(x, "#.#") + "×"
+fmtCash(x) => na(x) or math.abs(x) > 1e12 ? "—" : "$" + f_fmt_num(x)
+fmtN(x)    => na(x) or math.abs(x) > 999 ? "—" : str.tostring(x, "#")
+fmtPlus(x) => na(x) or math.abs(x) > 999 ? "—" : (x > 0 ? "+" : "") + str.tostring(x, "#")
+
+// =============== Enhanced Sector Detection Function ===============
+f_detect_sector() =>
+    ticker = syminfo.ticker
+    sector = "XLK"  // Default to tech
+
+    // Technology - Expanded list
+    if str.contains(ticker, "AAPL") or str.contains(ticker, "MSFT") or str.contains(ticker, "NVDA") or
+       str.contains(ticker, "GOOGL") or str.contains(ticker, "GOOG") or str.contains(ticker, "META") or
+       str.contains(ticker, "TSLA") or str.contains(ticker, "AMD") or str.contains(ticker, "INTC") or
+       str.contains(ticker, "CRM") or str.contains(ticker, "ORCL") or str.contains(ticker, "ADBE") or
+       str.contains(ticker, "NFLX") or str.contains(ticker, "PYPL") or str.contains(ticker, "AMZN")
+        sector := "XLK"
+    // Financials
+    else if str.contains(ticker, "JPM") or str.contains(ticker, "BAC") or str.contains(ticker, "WFC") or str.contains(ticker, "GS") or str.contains(ticker, "MS") or str.contains(ticker, "C") or str.contains(ticker, "BRK") or str.contains(ticker, "V") or str.contains(ticker, "MA")
+        sector := "XLF"
+    // Healthcare
+    else if str.contains(ticker, "JNJ") or str.contains(ticker, "UNH") or str.contains(ticker, "PFE") or str.contains(ticker, "ABBV") or str.contains(ticker, "MRK") or str.contains(ticker, "LLY") or str.contains(ticker, "TMO") or str.contains(ticker, "DHR") or str.contains(ticker, "ABT")
+        sector := "XLV"
+    // Energy
+    else if str.contains(ticker, "XOM") or str.contains(ticker, "CVX") or str.contains(ticker, "COP") or str.contains(ticker, "SLB") or str.contains(ticker, "OXY") or str.contains(ticker, "EOG")
+        sector := "XLE"
+    // Consumer Discretionary
+    else if str.contains(ticker, "HD") or str.contains(ticker, "NKE") or str.contains(ticker, "MCD") or str.contains(ticker, "SBUX") or str.contains(ticker, "TGT") or str.contains(ticker, "LOW") or str.contains(ticker, "TJX") or str.contains(ticker, "BKNG")
+        sector := "XLY"
+    // Consumer Staples
+    else if str.contains(ticker, "PG") or str.contains(ticker, "KO") or str.contains(ticker, "PEP") or str.contains(ticker, "WMT") or str.contains(ticker, "COST") or str.contains(ticker, "CL")
+        sector := "XLP"
+    // Industrials
+    else if str.contains(ticker, "BA") or str.contains(ticker, "CAT") or str.contains(ticker, "GE") or str.contains(ticker, "MMM") or str.contains(ticker, "HON") or str.contains(ticker, "UPS")
+        sector := "XLI"
+    // Materials
+    else if str.contains(ticker, "LIN") or str.contains(ticker, "APD") or str.contains(ticker, "ECL") or str.contains(ticker, "SHW") or str.contains(ticker, "DD") or str.contains(ticker, "DOW")
+        sector := "XLB"
+    sector
+
+// Get sector ETF
+actualSectorETF = sectorETF == "Auto" ? f_detect_sector() : sectorETF
+
+// =============== Session Detection ===============
+isRTH = not na(time(timeframe.period, sessionStr))
+isNewDay = ta.change(time("D")) != 0
+
+// Enhanced session calculations
+sessionMinutes = math.round((time - math.floor(time/86400000)*86400000) / 60000)
+sessionStartMin = 9 * 60 + 30  // 9:30 AM in minutes
+elapsedSessionMin = math.max(0, sessionMinutes - sessionStartMin)
+
+// =============== Core Calculations - Optimized Security Calls ===============
+// Basic calculations
+barDollar = close * volume
+
+// Optimized security calls using tuples
+[benchClose, benchRoc] = request.security(bench, timeframe.period, [close, ta.roc(close, 1)])
+[sectorClose, sectorChange, sectorRoc1, sectorRoc2] = request.security(actualSectorETF, timeframe.period, [close, ta.roc(close, 1), ta.roc(close, 5), ta.roc(close, 20)])
+[spyChange] = request.security("SPY", timeframe.period, [ta.roc(close, 1)])
+
+// Daily data with optimized calls
+[advVolDaily, advDollarDaily, prevClose, dailyATR] = request.security(syminfo.tickerid, "D", [volume, close * volume, close[1], ta.atr(14)])
+
+// Day level tracking with proper initialization
+var float dayOpen = na
+var float dayHigh = na
+var float dayLow = na
+var float dayVol = na
+var float dayDollar = na
+
+if isNewDay
+    dayOpen := open
+    dayHigh := high
+    dayLow := low
+    dayVol := volume
+    dayDollar := barDollar
+else if not na(dayOpen)  // Only update if dayOpen is properly set
+    dayHigh := math.max(nz(dayHigh, high), high)
+    dayLow := math.min(nz(dayLow, low), low)
+    dayVol := nz(dayVol, 0) + volume
+    dayDollar := nz(dayDollar, 0) + barDollar
+
+// Volume metrics with error handling
+volSMA = ta.sma(volume, rvolLen)
+rvol = (na(volSMA) or volSMA <= 0) ? na : volume / volSMA
+
+// =============== RVAT (Relative Volume At Time) - Optimized ===============
+// Memory-safe RVAT calculation
+maxHistorySize = math.min(rvatDays * 26, 400)  // Cap array size for performance
+var rvatHistory = array.new_float(maxHistorySize, 0.0)
+var int dayIndex = 0
+var int barInDay = 0
+
+if isNewDay and isRTH
+    dayIndex := dayIndex + 1
+    barInDay := 0
+else if isRTH
+    barInDay := barInDay + 1
+
+// Calculate session bar position (more robust)
+sessionBar = na(elapsedSessionMin) ? na : math.floor(elapsedSessionMin / 15)  // 15-min bars
+
+// Store volume in history with bounds checking
+if not na(sessionBar) and sessionBar >= 0 and sessionBar < 26 and dayIndex <= rvatDays
+    idx = math.min(((dayIndex - 1) % rvatDays) * 26 + int(sessionBar), maxHistorySize - 1)
+    if idx >= 0 and idx < array.size(rvatHistory)
+        array.set(rvatHistory, idx, volume)
+
+// Calculate RVAT with improved averaging
+avgVolAtTime = 0.0
+validBars = 0
+if not na(sessionBar) and sessionBar >= 0 and sessionBar < 26
+    for d = 1 to math.min(dayIndex - 1, rvatDays)
+        idx = ((d - 1) % rvatDays) * 26 + int(sessionBar)
+        if idx >= 0 and idx < array.size(rvatHistory)
+            vol = array.get(rvatHistory, idx)
+            if vol > 0
+                avgVolAtTime := avgVolAtTime + vol
+                validBars := validBars + 1
+
+rvat = (validBars > 0 and avgVolAtTime > 0) ? volume / (avgVolAtTime / validBars) : na
+
+// =============== VWM (Volume-Weighted Momentum) - Enhanced ===============
+// More robust VWM calculation
+volumeWeightedROC = volume * ta.roc(close, vwmLength)
+avgVolumeWeightedROC = ta.sma(volumeWeightedROC, vwmLength)
+avgVolume = ta.sma(volume, vwmLength)
+vwm = (na(avgVolume) or avgVolume <= 0) ? na : avgVolumeWeightedROC / avgVolume
+
+// =============== Money Flow Persistence - Fixed ===============
+// Fixed MFI function call
+mfi = ta.mfi(close, mfiLength)  // FIXED: Correct parameter count
+var int mfPersistence = 0
+
+if not na(mfi)
+    if mfi > 50
+        mfPersistence := mfPersistence > 0 ? mfPersistence + 1 : 1
+    else
+        mfPersistence := mfPersistence < 0 ? mfPersistence - 1 : -1
+
+// =============== Volatility Expansion Score ===============
+currentRange = high - low
+avgRange = ta.sma(high - low, 20)
+volExpansion = (na(avgRange) or avgRange <= 0) ? na : currentRange / avgRange
+
+// Combined with volume for quality (with validation)
+volExpQuality = na(volExpansion) or na(rvol) ? na : volExpansion * math.max(rvol, 1.0)
+
+// =============== Sector Analysis - Enhanced ===============
+// Calculate relative strength vs sector
+stockDayChange = na(dayOpen) or dayOpen <= 0 ? na : (close - dayOpen) / dayOpen * 100
+sectorRS = na(sectorChange) or na(stockDayChange) ? na : stockDayChange - sectorChange
+
+// Sector momentum score
+sectorMom = (nz(sectorRoc1, 0) + nz(sectorRoc2, 0)) / 2
+
+// SPY comparison for sector
+sectorVsSPY = na(spyChange) or na(sectorChange) ? na : sectorChange - spyChange
+
+// =============== Advanced Volume Metrics ===============
+// ADV calculations with error handling
+advVol = ta.sma(advVolDaily, advLen)
+advDollar = ta.sma(advDollarDaily, advLen)
+avg20Dollar = ta.sma(advDollarDaily, 20)
+
+// Pace calculations with session validation
+isIntra = timeframe.isintraday
+var float paceMult = na
+var float dollarPace = na
+
+if isIntra and isRTH and not na(elapsedSessionMin) and elapsedSessionMin > 0
+    projectedVolume = (nz(dayVol, 0) * rthMin) / elapsedSessionMin
+    paceMult := (not na(advVol) and advVol > 0) ? projectedVolume / advVol : na
+
+    projectedDollar = (nz(dayDollar, 0) * rthMin) / elapsedSessionMin
+    dollarPace := (not na(avg20Dollar) and avg20Dollar > 0) ? projectedDollar / avg20Dollar : na
+
+// =============== RS Score - Enhanced ===============
+rsRatio = (na(benchClose) or benchClose <= 0) ? na : close / benchClose
+rsLo = ta.lowest(rsRatio, rsLookback)
+rsHi = ta.highest(rsRatio, rsLookback)
+rsScore = (na(rsRatio) or na(rsLo) or na(rsHi) or rsHi <= rsLo) ? na : 100 * (rsRatio - rsLo) / (rsHi - rsLo)
+
+// =============== Momentum Score - Enhanced ===============
+roc1 = ta.roc(close, m1)
+roc2 = ta.roc(close, m2)
+roc3 = ta.roc(close, m3)
+roc4 = ta.roc(close, m4)
+momRaw = (nz(roc1, 0) + nz(roc2, 0) + nz(roc3, 0) + nz(roc4, 0)) / 4.0
+momLo = ta.lowest(momRaw, 252)
+momHi = ta.highest(momRaw, 252)
+momScore = (na(momLo) or na(momHi) or momHi <= momLo) ? na : 100 * (momRaw - momLo) / (momHi - momLo)
+
+// =============== Risk Metrics ===============
+// ATR/ADR with proper validation
+adrPct = 100 * ta.sma(request.security(syminfo.tickerid, "D", high - low), 20) / close
+atrPct = (na(dailyATR) or close <= 0) ? na : 100 * dailyATR / close
+
+// =============== Key Levels ===============
+// VWAP distance
+vwapValue = ta.vwap(hlc3)
+vwapDist_pct = (na(vwapValue) or vwapValue <= 0) ? na : (close - vwapValue) / vwapValue * 100
+
+// Gap detection with proper validation
+gapSize = (na(prevClose) or na(dayOpen) or prevClose <= 0) ? 0 : (dayOpen - prevClose) / prevClose * 100
+hasGap = math.abs(gapSize) > 0.5
+gapFilled = hasGap and na(prevClose) ? false :
+           ((gapSize > 0 and low <= prevClose) or (gapSize < 0 and high >= prevClose))
+
+// =============== Opening Range - Enhanced ===============
+var float orHigh = na
+var float orLow = na
+var bool orSet = false
+
+if isNewDay
+    orHigh := high
+    orLow := low
+    orSet := false
+else if not orSet and isRTH and not na(elapsedSessionMin) and elapsedSessionMin <= orMinutes
+    orHigh := math.max(nz(orHigh, high), high)
+    orLow := math.min(nz(orLow, low), low)
+else if not orSet and isRTH
+    orSet := true
+
+orBreakUp = orSet and not na(orHigh) and close > orHigh
+orBreakDown = orSet and not na(orLow) and close < orLow
+
+// =============== Squeeze Detection - Enhanced ===============
+length = 20
+mult = 2.0
+multKC = 1.5
+basis = ta.sma(close, length)
+dev = mult * ta.stdev(close, length)
+upperBB = basis + dev
+lowerBB = basis - dev
+ma = ta.sma(close, length)
+rangeTR = ta.tr
+rangema = ta.sma(rangeTR, length)
+upperKC = ma + rangema * multKC
+lowerKC = ma - rangema * multKC
+sqzOn = lowerBB > lowerKC and upperBB < upperKC
+sqzOff = lowerBB < lowerKC and upperBB > upperKC
+
+// Enhanced momentum oscillator for squeeze
+val = ta.linreg(close - (ta.highest(high, length) + ta.lowest(low, length)) / 2 / 2, length, 0)
+squeezeMomentum = na(val) ? "—" :
+                 (val > 0 ? (val > nz(val[1], val) ? "🟢↑" : "🟢↓") :
+                           (val < nz(val[1], val) ? "🔴↓" : "🔴↑"))
+
+// =============== Enhanced Signal Strength Calculation ===============
+signalPoints = 0
+// Volume signals (max 6 points)
+signalPoints := signalPoints +na(rvol) ? 0 : (rvol >= 2.5 ? 2 : (rvol >= 1.5 ? 1 : 0))
+signalPoints := signalPoints +na(rvat) ? 0 : (rvat >= 2.0 ? 2 : (rvat >= 1.5 ? 1 : 0))
+signalPoints := signalPoints +na(paceMult) ? 0 : (paceMult >= 2.0 ? 2 : (paceMult >= 1.5 ? 1 : 0))
+
+// Money flow signals (max 4 points)
+signalPoints := signalPoints +na(vwm) ? 0 : (vwm > 5 ? 2 : (vwm > 0 ? 1 : 0))
+signalPoints := signalPoints +na(mfPersistence) ? 0 : (math.abs(mfPersistence) >= 5 ? 2 : (math.abs(mfPersistence) >= 3 ? 1 : 0))
+
+// Momentum signals (max 4 points)
+signalPoints := signalPoints +na(rsScore) ? 0 : (rsScore >= 80 ? 2 : (rsScore >= 60 ? 1 : 0))
+signalPoints := signalPoints +na(momScore) ? 0 : (momScore >= 80 ? 2 : (momScore >= 60 ? 1 : 0))
+
+// Technical signals (max 4 points)
+signalPoints := signalPoints +na(sectorRS) ? 0 : (sectorRS > 2 ? 2 : (sectorRS > 0 ? 1 : 0))
+signalPoints := signalPoints +na(vwapDist_pct) ? 0 : (math.abs(vwapDist_pct) <= 1 ? 1 : 0)
+signalPoints := signalPoints +orBreakUp ? 2 : (orBreakDown ? -1 : 0)
+
+// Volatility signals (max 2 points)
+signalPoints := signalPoints +na(volExpQuality) ? 0 : (volExpQuality >= 3 ? 2 : (volExpQuality >= 2 ? 1 : 0))
+signalPoints := signalPoints +sqzOn ? 1 : 0
+
+signalStrength = signalPoints >= 15 ? "🔥 ELITE" :signalPoints >= 12 ? "💪 STRONG" : signalPoints >= 8 ? "✅ GOOD" : signalPoints >= 4 ? "⚡ ACTIVE" : "💤 QUIET"
+
+// =============== Enhanced Color Logic ===============
+rvolCol = na(rvol) ? weakCol : (rvol >= 3 ? strongCol : rvol >= 2 ? okCol : rvol >= 1.5 ? warnCol : weakCol)
+rvatCol = na(rvat) ? weakCol : (rvat >= 2 ? strongCol : rvat >= 1.5 ? okCol : rvat >= 1 ? warnCol : weakCol)
+vwmCol = na(vwm) ? weakCol : (vwm > 10 ? strongCol : vwm > 0 ? okCol : vwm > -10 ? warnCol : badCol)
+mfpCol = na(mfPersistence) ? weakCol : (math.abs(mfPersistence) >= 5 ? strongCol : math.abs(mfPersistence) >= 3 ? okCol : math.abs(mfPersistence) >= 1 ? warnCol : weakCol)
+volExpCol = na(volExpansion) ? weakCol : (volExpansion >= 2 ? strongCol : volExpansion >= 1.5 ? okCol : volExpansion >= 1 ? warnCol : weakCol)
+rsCol = na(rsScore) ? weakCol : (rsScore >= 85 ? strongCol : rsScore >= 70 ? okCol : rsScore >= 50 ? warnCol : weakCol)
+momCol = na(momScore) ? weakCol : (momScore >= 85 ? strongCol : momScore >= 70 ? okCol : momScore >= 50 ? warnCol : weakCol)
+paceCol = na(paceMult) ? weakCol : (paceMult >= 2.5 ? strongCol : paceMult >= 1.5 ? okCol : paceMult >= 1 ? warnCol : weakCol)
+sectorRSCol = na(sectorRS) ? weakCol : (sectorRS > 3 ? strongCol : sectorRS > 0 ? okCol : sectorRS > -3 ? warnCol : badCol)
+sectorMomCol = na(sectorMom) ? weakCol : (sectorMom > 5 ? strongCol : sectorMom > 0 ? okCol : sectorMom > -5 ? warnCol : badCol)
+vwapCol = na(vwapDist_pct) ? weakCol : (math.abs(vwapDist_pct) <= 0.5 ? strongCol : math.abs(vwapDist_pct) <= 1 ? okCol : math.abs(vwapDist_pct) <= 2 ? warnCol : badCol)
+gapCol = hasGap ? (gapFilled ? okCol : warnCol) : weakCol
+orCol = orBreakUp ? strongCol : orBreakDown ? badCol : weakCol
+squeezeCol = sqzOn ? strongCol : sqzOff ? warnCol : weakCol
+atrCol = na(atrPct) ? weakCol : (atrPct >= atrGreen ? okCol : atrPct >= atrWarn ? warnCol : weakCol)
+adrCol = na(adrPct) ? weakCol : (adrPct >= adrGreen ? okCol : adrPct >= adrWarn ? warnCol : weakCol)
+
+// =============== Optimized Table Construction ===============
+var table panel = na
+
+if showPanel and barstate.islast
+    // Only recreate table if it doesn't exist
+    if na(panel)
+        // Calculate rows needed
+        numRows = 1  // Header
+        numRows := numRows +showSectorSection ? 3 : 0
+        numRows := numRows +showVolSection ? 4 : 0
+        numRows := numRows +showFlowSection ? 3 : 0
+        numRows := numRows +showMomentum ? 2 : 0
+        numRows := numRows +showLevelsSection ? 3 : 0
+        numRows := numRows +showRiskSection ? 2 : 0
+        numRows := numRows +showSqueeze ? 1 : 0
+
+        effBordW = showBorder ? borderWidth : 0
+        effBordC = showBorder ? borderColor : color.new(color.black, 100)
+
+        panel := table.new(curPos, 2, numRows,
+                          bgcolor = bgCol,
+                          frame_color = effBordC,
+                          frame_width = effBordW,
+                          border_color = effBordC,
+                          border_width = effBordW)
+
+    // Clear existing content for updates
+    if not na(panel)
+        table.clear(panel, 0, 0, 1, 20)  // Clear up to 20 rows
+
+    row = 0
+
+    // Header with enhanced signal strength
+    if not na(panel)
+        table.cell(panel, 0, row, "📊 " + syminfo.ticker, text_color=headerCol, text_halign=text.align_left, text_size=isLarge ? size.normal : txtSize, bgcolor=bgCol, width=6)
+        table.cell(panel, 1, row, signalStrength, text_color=signalPoints >= 15 ? strongCol : (signalPoints >= 12 ? okCol : (signalPoints >= 8 ? warnCol : weakCol)), text_halign=text.align_right, text_size=txtSize, bgcolor=bgCol, width=4)
+        row := row + 1
+
+    // Sector Section
+    if showSectorSection and not na(panel)
+        table.cell(panel, 0, row, "Sector", text_color=txtCol, text_halign=text.align_left, text_size=txtSize, bgcolor=bgCol)
+        table.cell(panel, 1, row, actualSectorETF, text_color=headerCol, text_halign=text.align_right, text_size=txtSize, bgcolor=bgCol)
+        row := row + 1
+
+        table.cell(panel, 0, row, "vs Sector", text_color=txtCol, text_halign=text.align_left, text_size=txtSize, bgcolor=bgCol)
+        table.cell(panel, 1, row, (na(sectorRS) ? "—" : (sectorRS > 0 ? "+" : "") + fmtPct(sectorRS)), text_color=sectorRSCol, text_halign=text.align_right, text_size=txtSize, bgcolor=bgCol)
+        row := row + 1
+
+        table.cell(panel, 0, row, "Sector Mom", text_color=txtCol, text_halign=text.align_left, text_size=txtSize, bgcolor=bgCol)
+        table.cell(panel, 1, row, fmtPct(sectorMom), text_color=sectorMomCol, text_halign=text.align_right, text_size=txtSize, bgcolor=bgCol)
+        row := row + 1
+
+    // Volume Section
+    if showVolSection and not na(panel)
+        table.cell(panel, 0, row, "RVOL", text_color=txtCol, text_halign=text.align_left, text_size=txtSize, bgcolor=bgCol)
+        table.cell(panel, 1, row, fmtX(rvol), text_color=rvolCol, text_halign=text.align_right, text_size=txtSize, bgcolor=bgCol)
+        row := row + 1
+
+        table.cell(panel, 0, row, "RVAT", text_color=txtCol, text_halign=text.align_left, text_size=txtSize, bgcolor=bgCol)
+        table.cell(panel, 1, row, fmtX(rvat), text_color=rvatCol, text_halign=text.align_right, text_size=txtSize, bgcolor=bgCol)
+        row := row + 1
+
+        table.cell(panel, 0, row, "$Vol Today", text_color=txtCol, text_halign=text.align_left, text_size=txtSize, bgcolor=bgCol)
+        table.cell(panel, 1, row, fmtCash(dayDollar), text_color=txtCol, text_halign=text.align_right, text_size=txtSize, bgcolor=bgCol)
+        row := row + 1
+
+        showPaceRow = not compactMode or (not na(paceMult) and paceMult >= 1.2)
+        if showPaceRow
+            table.cell(panel, 0, row, "Pace ×ADV", text_color=txtCol, text_halign=text.align_left, text_size=txtSize, bgcolor=bgCol)
+            table.cell(panel, 1, row, fmtX(paceMult), text_color=paceCol, text_halign=text.align_right, text_size=txtSize, bgcolor=bgCol)
+            row := row + 1
+
+    // Money Flow Section
+    if showFlowSection and not na(panel)
+        table.cell(panel, 0, row, "VWM", text_color=txtCol, text_halign=text.align_left, text_size=txtSize, bgcolor=bgCol)
+        table.cell(panel, 1, row, fmtPlus(na(vwm) ? na : math.round(vwm)), text_color=vwmCol, text_halign=text.align_right, text_size=txtSize, bgcolor=bgCol)
+        row := row + 1
+
+        mfpText = na(mfPersistence) ? "—" : (mfPersistence > 0 ? "+" + str.tostring(mfPersistence) : str.tostring(mfPersistence))
+        table.cell(panel, 0, row, "MF Persist", text_color=txtCol, text_halign=text.align_left, text_size=txtSize, bgcolor=bgCol)
+        table.cell(panel, 1, row, mfpText, text_color=mfpCol, text_halign=text.align_right, text_size=txtSize, bgcolor=bgCol)
+        row := row + 1
+
+        table.cell(panel, 0, row, "Vol Exp", text_color=txtCol, text_halign=text.align_left, text_size=txtSize, bgcolor=bgCol)
+        table.cell(panel, 1, row, fmtX(volExpansion), text_color=volExpCol, text_halign=text.align_right, text_size=txtSize, bgcolor=bgCol)
+        row := row + 1
+
+    // Momentum Section
+    if showMomentum and not na(panel)
+        showRSRow = not compactMode or (not na(rsScore) and rsScore >= 60)
+        if showRSRow
+            table.cell(panel, 0, row, "RS Score", text_color=txtCol, text_halign=text.align_left, text_size=txtSize, bgcolor=bgCol)
+            table.cell(panel, 1, row, fmtN(rsScore), text_color=rsCol, text_halign=text.align_right, text_size=txtSize, bgcolor=bgCol)
+            row := row + 1
+
+        showMomRow = not compactMode or (not na(momScore) and momScore >= 60)
+        if showMomRow
+            table.cell(panel, 0, row, "Momentum", text_color=txtCol, text_halign=text.align_left, text_size=txtSize, bgcolor=bgCol)
+            table.cell(panel, 1, row, fmtN(momScore), text_color=momCol, text_halign=text.align_right, text_size=txtSize, bgcolor=bgCol)
+            row := row + 1
+
+    // Key Levels Section
+    if showLevelsSection and not na(panel)
+        if vwapDist
+            table.cell(panel, 0, row, "VWAP Dist", text_color=txtCol, text_halign=text.align_left, text_size=txtSize, bgcolor=bgCol)
+            table.cell(panel, 1, row, na(vwapDist_pct) ? "—" : ((vwapDist_pct > 0 ? "+" : "") + fmtPct(vwapDist_pct)), text_color=vwapCol, text_halign=text.align_right, text_size=txtSize, bgcolor=bgCol)
+            row := row + 1
+
+        if showGap and hasGap
+            gapText = (gapSize > 0 ? "↑" : "↓") + fmtPct(math.abs(gapSize))
+            table.cell(panel, 0, row, "Gap " + (gapFilled ? "✓" : ""), text_color=txtCol, text_halign=text.align_left, text_size=txtSize, bgcolor=bgCol)
+            table.cell(panel, 1, row, gapText, text_color=gapCol, text_halign=text.align_right, text_size=txtSize, bgcolor=bgCol)
+            row := row + 1
+
+        if showOR and orSet
+            orStatus = orBreakUp ? "↑ Break" : (orBreakDown ? "↓ Break" : "Inside")
+            table.cell(panel, 0, row, "OR Status", text_color=txtCol, text_halign=text.align_left, text_size=txtSize, bgcolor=bgCol)
+            table.cell(panel, 1, row, orStatus, text_color=orCol, text_halign=text.align_right, text_size=txtSize, bgcolor=bgCol)
+            row := row + 1
+
+    // Risk Section
+    if showRiskSection and not na(panel)
+        table.cell(panel, 0, row, "ATR% (14)", text_color=txtCol, text_halign=text.align_left, text_size=txtSize, bgcolor=bgCol)
+        table.cell(panel, 1, row, fmtPct(atrPct), text_color=atrCol, text_halign=text.align_right, text_size=txtSize, bgcolor=bgCol)
+        row := row + 1
+
+        rngPctToday = na(dayHigh) or na(dayLow) or close <= 0 ? na : 100 * (dayHigh - dayLow) / close
+        rngVsADR = (na(adrPct) or na(rngPctToday) or adrPct <= 0) ? na : (rngPctToday / adrPct) * 100
+        rangeCol = na(rngVsADR) ? weakCol : (rngVsADR >= 90 ? badCol : rngVsADR >= 70 ? warnCol : okCol)
+        table.cell(panel, 0, row, "Range/ADR", text_color=txtCol, text_halign=text.align_left, text_size=txtSize, bgcolor=bgCol)
+        table.cell(panel, 1, row, fmtPct(rngVsADR), text_color=rangeCol, text_halign=text.align_right, text_size=txtSize, bgcolor=bgCol)
+        row := row + 1
+
+    // Squeeze Section
+    if showSqueeze and not na(panel)
+        sqzStatus = sqzOn ? "🎯 ON " + squeezeMomentum : (sqzOff ? "OFF" : "—")
+        table.cell(panel, 0, row, "Squeeze", text_color=txtCol, text_halign=text.align_left, text_size=txtSize, bgcolor=bgCol)
+        table.cell(panel, 1, row, sqzStatus, text_color=squeezeCol, text_halign=text.align_right, text_size=txtSize, bgcolor=bgCol)
+        row := row + 1
+
+// =============== Enhanced Alerts ===============
+alertcondition(not na(rvol) and rvol >= volAlert, title="High RVOL", message="RVOL Alert: {{ticker}} showing high relative volume")
+alertcondition(not na(rvat) and rvat >= 2.0, title="High RVAT", message="{{ticker}} RVAT elevated vs same time")
+alertcondition(not na(vwm) and vwm > 10, title="Strong VWM", message="{{ticker}} Volume-Weighted Momentum strong")
+alertcondition(not na(mfPersistence) and math.abs(mfPersistence) >= 5, title="MF Persistence", message="{{ticker}} Money Flow showing persistence")
+alertcondition(not na(volExpansion) and volExpansion >= 2, title="Vol Expansion", message="{{ticker}} Volatility Expansion detected")
+alertcondition(not na(sectorRS) and sectorRS > 3, title="Sector Outperform", message="{{ticker}} outperforming sector significantly")
+alertcondition(orBreakUp, title="OR Break Up", message="{{ticker}} broke above opening range")
+alertcondition(orBreakDown, title="OR Break Down", message="{{ticker}} broke below opening range")
+alertcondition(sqzOn, title="Squeeze On", message="{{ticker}} entering squeeze compression")
+alertcondition(signalPoints >= 15, title="Elite Signal", message="{{ticker}} showing ELITE setup signal")
+
+// =============== Performance Metrics for Data Window ===============
+plot(na(rvol) ? na : rvol, "RVOL", display=display.data_window)
+plot(na(rvat) ? na : rvat, "RVAT", display=display.data_window)
+plot(na(vwm) ? na : vwm, "VWM", display=display.data_window)
+plot(signalPoints, "Signal Points", display=display.data_window)
